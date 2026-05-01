@@ -1,0 +1,238 @@
+%% Prethrift — High-Level Architecture
+%% Render with: https://mermaid.live or `mmdc -i ARCHITECTURE_OVERVIEW.mmd -o out.svg`
+
+flowchart LR
+  %% =========================
+  %% Clients
+  %% =========================
+  subgraph CLIENTS["Clients"]
+    direction TB
+    WebUI["prethrift-ui<br/>(Vite + React 19 SPA)"]
+    Mobile["mobile-app<br/>(Expo / React Native + react-native-web)"]
+    Admin["admin<br/>(Next.js 15 + Tailwind v4)"]
+  end
+
+  %% =========================
+  %% Edge / front door
+  %% =========================
+  subgraph EDGE["AWS Edge"]
+    direction TB
+    Route53["Route 53<br/>(custom domains)"]
+    WAF["AWS WAF"]
+    CloudFront["CloudFront<br/>(branded image domain + web hosting)"]
+    APIGW["API Gateway HTTP API<br/>(shared-api-gateway-stack)"]
+    Cognito["Cognito User Pool<br/>(auth-stack)"]
+  end
+
+  %% =========================
+  %% Lambda services (Effect-TS)
+  %% =========================
+  subgraph SERVICES["Lambda Services (Effect-TS)"]
+    direction TB
+    SvcAuth["auth"]
+    SvcAdmin["admin"]
+    SvcCart["cart"]
+    SvcInventory["inventory"]
+    SvcSearch["search"]
+    SvcClassifier["classifier"]
+    SvcEmbedder["embedder"]
+    SvcLooks["looks"]
+    SvcProfile["profile"]
+    SvcStorefront["storefront"]
+    SvcSourcing["sourcing"]
+    SvcReports["reports"]
+    SvcSandbox["sandbox"]
+  end
+
+  %% Per-service internal layout
+  subgraph SVC_LAYOUT["Per-service src/ layout"]
+    direction TB
+    H["handlers/<br/>(thin Lambda entry)"]
+    D["domain/<br/>(Service + ServiceLive,<br/>Effect.gen, Layer, Context.Tag)"]
+    E["events/<br/>(EventBridge producers/consumers)"]
+    Z["schemas/<br/>(Zod + types)"]
+    O["openapi/<br/>(service contract)"]
+    H --> D
+    D --> E
+    H --> Z
+    Z --> O
+  end
+
+  %% =========================
+  %% Shared packages
+  %% =========================
+  subgraph PACKAGES["Shared packages/"]
+    direction TB
+    PkgEffect["effect-utils<br/>aws-effects<br/>effect-router<br/>effect-otel"]
+    PkgErrors["domain-errors<br/>(tagged unions)"]
+    PkgEvents["domain-events<br/>(versioned payloads)"]
+    PkgPublisher["event-publisher"]
+    PkgApi["api-utils<br/>authorization"]
+    PkgFashion["fashion-schema<br/>(garment ontology)"]
+    PkgImage["image-utils<br/>background-removal"]
+    PkgLLM["llm-utils<br/>pipeline-utils"]
+    PkgMisc["organization-utils<br/>utils"]
+  end
+
+  %% =========================
+  %% Lambda layers
+  %% =========================
+  subgraph LAYERS["Lambda layers/"]
+    direction TB
+    LayEffect["effect"]
+    LayOtel["effect-otel"]
+    LaySharp["sharp<br/>(linux-x64-glibc)"]
+  end
+
+  %% =========================
+  %% Data + integration
+  %% =========================
+  subgraph DATA["Data & Integration (AWS)"]
+    direction TB
+    DDB[("DynamoDB<br/>per-service tables")]
+    S3[("S3<br/>images, exports, batch")]
+    EB(("EventBridge<br/>custom bus + rules"))
+    OS[("OpenSearch<br/>(catalog/search)")]
+    Athena[("Athena over S3<br/>(analytics)")]
+    Secrets[("Secrets Manager")]
+    Batch["Batch processing<br/>(batch-processing-stack)"]
+  end
+
+  %% =========================
+  %% External
+  %% =========================
+  subgraph EXT["External"]
+    direction TB
+    Shopify["Shopify webhooks/API"]
+    LLM["LLM providers"]
+    Wix["Wix submissions"]
+  end
+
+  %% =========================
+  %% Observability + IaC
+  %% =========================
+  subgraph OBS["Observability & IaC"]
+    direction TB
+    OTel["OpenTelemetry<br/>(via effect-otel layer)"]
+    CDK["AWS CDK<br/>(infra/cdk/lib/*-stack.ts)"]
+    TF["Terraform<br/>(infra/terraform — slice)"]
+    Specs["specs/<br/>OpenAPI + ontology"]
+  end
+
+  %% =========================
+  %% Edges: clients -> edge
+  %% =========================
+  WebUI -->|HTTPS| Route53
+  Mobile -->|HTTPS| Route53
+  Admin -->|HTTPS| Route53
+  Route53 --> WAF --> APIGW
+  Route53 --> CloudFront
+  Mobile -. JWT .-> Cognito
+  WebUI -. JWT .-> Cognito
+  Admin -. JWT .-> Cognito
+  APIGW -. JWT authorizer .- Cognito
+
+  %% =========================
+  %% Edge -> services
+  %% =========================
+  APIGW --> SvcAuth
+  APIGW --> SvcAdmin
+  APIGW --> SvcCart
+  APIGW --> SvcInventory
+  APIGW --> SvcSearch
+  APIGW --> SvcClassifier
+  APIGW --> SvcLooks
+  APIGW --> SvcProfile
+  APIGW --> SvcStorefront
+  APIGW --> SvcSourcing
+  APIGW --> SvcReports
+  APIGW --> SvcSandbox
+
+  %% =========================
+  %% Services share layout + packages + layers
+  %% =========================
+  SERVICES -. follow .-> SVC_LAYOUT
+  SERVICES -. depend on .-> PACKAGES
+  SERVICES -. mount .-> LAYERS
+
+  %% =========================
+  %% Async eventing (immutable, versioned facts)
+  %% =========================
+  SvcInventory -- InventoryCreated/Updated --> EB
+  SvcCart -- CartEvents --> EB
+  SvcClassifier -- ClassifiedItem --> EB
+  SvcEmbedder -- EmbeddingReady --> EB
+  SvcLooks -- LookPublished --> EB
+  SvcSourcing -- SourcedItem --> EB
+  EB --> SvcSearch
+  EB --> SvcEmbedder
+  EB --> SvcInventory
+  EB --> SvcLooks
+  EB --> SvcReports
+
+  %% =========================
+  %% Services -> data
+  %% =========================
+  SvcCart --> DDB
+  SvcInventory --> DDB
+  SvcProfile --> DDB
+  SvcStorefront --> DDB
+  SvcLooks --> DDB
+  SvcSourcing --> DDB
+  SvcReports --> DDB
+  SvcSearch --> OS
+  SvcInventory --> OS
+  SvcClassifier --> S3
+  SvcEmbedder --> S3
+  SvcLooks --> S3
+  SvcInventory --> S3
+  SvcReports --> Athena
+  Athena --> S3
+  SvcCart --> Secrets
+  Batch --> S3
+  Batch --> DDB
+
+  %% =========================
+  %% Cross-service HTTP (e.g. cart -> inventory)
+  %% =========================
+  SvcCart -- "InventoryHttpClient (HTTP)" --> SvcInventory
+
+  %% =========================
+  %% External integrations
+  %% =========================
+  Shopify -- webhooks --> APIGW
+  Shopify -. EventBridge partner .-> EB
+  EB --> SvcCart
+  SvcClassifier -- prompts --> LLM
+  SvcEmbedder -- embeddings --> LLM
+  SvcLooks <-- imports -- Wix
+
+  %% =========================
+  %% Observability + IaC associations
+  %% =========================
+  SERVICES -. traces/metrics .-> OTel
+  CDK -. provisions .-> EDGE
+  CDK -. provisions .-> SERVICES
+  CDK -. provisions .-> DATA
+  CDK -. provisions .-> LAYERS
+  Specs -. drives codegen .-> CLIENTS
+  Specs -. validated against .-> SERVICES
+
+  %% =========================
+  %% Styling
+  %% =========================
+  classDef client fill:#0ea5e9,stroke:#0369a1,color:#fff;
+  classDef edge fill:#f59e0b,stroke:#92400e,color:#111;
+  classDef svc fill:#10b981,stroke:#065f46,color:#fff;
+  classDef pkg fill:#a78bfa,stroke:#5b21b6,color:#111;
+  classDef data fill:#ef4444,stroke:#7f1d1d,color:#fff;
+  classDef ext fill:#6b7280,stroke:#1f2937,color:#fff;
+  classDef ops fill:#facc15,stroke:#713f12,color:#111;
+
+  class WebUI,Mobile,Admin client;
+  class Route53,WAF,CloudFront,APIGW,Cognito edge;
+  class SvcAuth,SvcAdmin,SvcCart,SvcInventory,SvcSearch,SvcClassifier,SvcEmbedder,SvcLooks,SvcProfile,SvcStorefront,SvcSourcing,SvcReports,SvcSandbox svc;
+  class PkgEffect,PkgErrors,PkgEvents,PkgPublisher,PkgApi,PkgFashion,PkgImage,PkgLLM,PkgMisc,LayEffect,LayOtel,LaySharp pkg;
+  class DDB,S3,EB,OS,Athena,Secrets,Batch data;
+  class Shopify,LLM,Wix ext;
+  class OTel,CDK,TF,Specs ops;

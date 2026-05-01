@@ -1,0 +1,197 @@
+%% Prethrift — Async Workflows (single combined flowchart)
+%% Render: npx -y @mermaid-js/mermaid-cli -i ARCHITECTURE_WORKFLOWS.mmd -o ARCHITECTURE_WORKFLOWS.svg
+%%
+%% Solid arrows  = synchronous / direct call
+%% Dotted arrows = DynamoDB stream
+%% Thick arrows  = EventBridge event (versioned domain event)
+
+flowchart LR
+  %% =========================
+  %% Ingress
+  %% =========================
+  subgraph INGRESS["Ingress"]
+    direction TB
+    ClientWeb["Web / Mobile / Sourcing"]
+    APIGW["API Gateway HTTP API"]
+    Shopify["Shopify (partner EventBridge)"]
+    AdminUI["Admin UI"]
+  end
+
+  %% =========================
+  %% Classifier pipeline
+  %% =========================
+  subgraph CLASSIFIER["Classifier pipeline"]
+    direction TB
+    CAPI["classifier-api-handler"]
+    CSQS[("SQS classification queue")]
+    CProc["classifier processor.ts"]
+    CDDB[("DDB classified-garments")]
+    CStream["classifier stream-event-publisher"]
+    CIdemp[("DDB idempotency")]
+    LLM1["LLM (vision)"]
+    S3raw[("S3 raw images")]
+  end
+
+  %% =========================
+  %% Inventory pipeline
+  %% =========================
+  subgraph INVENTORY["Inventory pipeline"]
+    direction TB
+    InvSub["inventory garment-classified-handler"]
+    IDDB[("DDB inventory-items")]
+    IStream["inventory stream-event-publisher"]
+    InvAPI["inventory-api-handler"]
+    InvHTTP["InventoryHttpClient (cross-svc)"]
+  end
+
+  %% =========================
+  %% Looks pipeline
+  %% =========================
+  subgraph LOOKS["Looks pipeline"]
+    direction TB
+    LAPI["looks-api-handler"]
+    LDDB[("DDB looks")]
+    LSQS[("SQS looks queue")]
+    LProc["looks processor.ts"]
+    LStream["looks stream-event-publisher"]
+    LStyle["looks styleroom-subscriber"]
+    LLM2["LLM (vision)"]
+    S3look[("S3 look images")]
+  end
+
+  %% =========================
+  %% EventBridge bus
+  %% =========================
+  EB(("EventBridge<br/>prethrift bus"))
+
+  %% =========================
+  %% Search consumers + index
+  %% =========================
+  subgraph SEARCH["Search service"]
+    direction TB
+    SInv["search inventory-event-handler"]
+    SLook["search looks-event-handler"]
+    SInf["search influencer-status-event-handler"]
+    SAPI["search-api-handler"]
+    Bedrock["Bedrock Titan<br/>(text + image embed)"]
+    OSInv[("OpenSearch inventory index")]
+    OSLook[("OpenSearch looks index")]
+  end
+
+  %% =========================
+  %% Profile / cart
+  %% =========================
+  subgraph PROFILE["Profile"]
+    direction TB
+    ProfAPI["profile-api-handler"]
+  end
+
+  subgraph CART["Cart"]
+    direction TB
+    CartShop["cart shopify-eventbridge-handler"]
+    CartSvc["CartService / OrderService"]
+    Secrets[("Secrets Manager")]
+  end
+
+  %% =========================
+  %% 1. Garment classification ingress -> classified DDB
+  %% =========================
+  ClientWeb -->|HTTPS| APIGW
+  APIGW --> CAPI
+  CAPI --> S3raw
+  CAPI --> CSQS
+  CSQS --> CProc
+  CProc --> LLM1
+  CProc --> CIdemp
+  CProc --> CDDB
+  CDDB -. DDB stream .-> CStream
+
+  %% =========================
+  %% 2. Classifier -> Inventory via EventBridge
+  %% =========================
+  CStream ==>|GarmentClassified| EB
+  EB ==>|GarmentClassified| InvSub
+  InvSub --> IDDB
+  APIGW --> InvAPI
+  InvAPI --> IDDB
+  IDDB -. DDB stream .-> IStream
+
+  %% =========================
+  %% 3. Inventory -> Search index
+  %% =========================
+  IStream ==>|Inventory Created/Updated/Deleted| EB
+  EB ==>|Inventory*| SInv
+  SInv --> Bedrock
+  SInv --> OSInv
+
+  %% =========================
+  %% 4. Looks ingress -> Looks classification
+  %% =========================
+  ClientWeb --> APIGW
+  APIGW --> LAPI
+  LAPI --> S3look
+  LAPI --> LDDB
+  LAPI --> LSQS
+  LSQS --> LProc
+  LProc --> S3look
+  LProc --> LLM2
+  LProc --> LDDB
+  LDDB -. DDB stream COMPLETED .-> LStream
+
+  %% =========================
+  %% 5. Looks -> Search index
+  %% =========================
+  LStream ==>|LookClassified| EB
+  EB ==>|LookClassified| SLook
+  SLook --> Bedrock
+  SLook --> OSLook
+
+  %% =========================
+  %% 6. Search query path
+  %% =========================
+  ClientWeb --> APIGW
+  APIGW --> SAPI
+  SAPI -. semantic/hybrid .-> Bedrock
+  SAPI --> OSInv
+  SAPI --> OSLook
+
+  %% =========================
+  %% 7. Influencer status -> bulk update looks
+  %% =========================
+  AdminUI --> APIGW
+  APIGW --> ProfAPI
+  ProfAPI ==>|InfluencerStatusChanged| EB
+  EB ==>|InfluencerStatusChanged| SInf
+  SInf --> OSLook
+
+  %% =========================
+  %% 8. StyleRoom -> Looks subscriber
+  %% =========================
+  ProfAPI ==>|StyleRoom Created/Updated/Deleted| EB
+  EB ==>|StyleRoom*| LStyle
+  LStyle --> LDDB
+
+  %% =========================
+  %% 9. Shopify order -> Cart -> Inventory reservation
+  %% =========================
+  Shopify ==>|orders/create paid cancelled updated| EB
+  EB ==>|Shopify orders| CartShop
+  CartShop --> Secrets
+  CartShop --> CartSvc
+  CartSvc --> InvHTTP
+  InvHTTP --> InvAPI
+
+  %% =========================
+  %% Styling
+  %% =========================
+  classDef ingress fill:#0ea5e9,stroke:#0369a1,color:#fff;
+  classDef svc fill:#10b981,stroke:#065f46,color:#fff;
+  classDef store fill:#ef4444,stroke:#7f1d1d,color:#fff;
+  classDef bus fill:#f59e0b,stroke:#92400e,color:#111;
+  classDef ext fill:#6b7280,stroke:#1f2937,color:#fff;
+
+  class ClientWeb,APIGW,Shopify,AdminUI ingress;
+  class CAPI,CProc,CStream,InvSub,InvAPI,InvHTTP,LAPI,LProc,LStream,LStyle,SInv,SLook,SInf,SAPI,ProfAPI,CartShop,CartSvc svc;
+  class S3raw,S3look,CDDB,IDDB,LDDB,OSInv,OSLook,CIdemp,Secrets,CSQS,LSQS store;
+  class EB bus;
+  class LLM1,LLM2,Bedrock ext;
