@@ -7,7 +7,7 @@
 - **React 19** for the web/mobile UIs.
 - Python is not used — fashion/ML logic runs through TS services that call out to managed/LLM APIs.
 
-## Frontend (`../frontend` + `frontend/admin`)
+## Frontend (`/frontend`)
 
 Three frontends, one npm workspace each:
 
@@ -17,7 +17,7 @@ Three frontends, one npm workspace each:
 
 Key frontend patterns: typed API clients generated from the backend's OpenAPI specs (`specs/api/*.yaml` → `npm run generate:types`), Cognito-issued JWTs sent to API Gateway, query/cache layer via TanStack Query.
 
-## Backend (`backend-issue-146/`)
+## Backend (`backend/`)
 
 A **TypeScript monorepo of Lambda services** built on the **Effect** framework. Top-level npm workspaces are `services/*`, `packages/*`, plus `infra/cdk` and `layers/*`.
 
